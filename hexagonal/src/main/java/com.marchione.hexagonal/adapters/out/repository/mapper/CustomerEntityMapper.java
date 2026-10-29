@@ -1,0 +1,12 @@
+package com.marchione.hexagonal.adapters.out.repository.mapper;
+
+import com.marchione.hexagonal.adapters.out.repository.entity.CustomerEntity;
+import com.marchione.hexagonal.application.core.domain.Customer;
+import org.mapstruct.Mapper;
+
+@Mapper(componentModel = "spring")
+public interface CustomerEntityMapper {
+
+    CustomerEntity toCustomerEntity(Customer customer);
+
+}
