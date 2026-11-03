@@ -15,6 +15,7 @@ public class CustomerRequest {
     @NotBlank
     private String zipCode;
 
+
     public String getZipCode() {
         return zipCode;
     }
