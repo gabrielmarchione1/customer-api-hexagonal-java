@@ -19,4 +19,7 @@ public class CustomerMessage {
 
     private Boolean isValidCpf;
 
+    public String getZipCode() {
+        return zipCode;
+    }
 }
