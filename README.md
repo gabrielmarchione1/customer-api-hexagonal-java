@@ -1,226 +1,105 @@
-# customer-api-hexagonal-java
+# Customer API — Arquitetura Hexagonal com Java
 
-API de clientes com **Arquitetura Hexagonal (Ports and Adapters)**, **Java**, **Spring Boot**, **Kafka** e **MongoDB**.
+API REST para cadastro e manutenção de clientes, construída como projeto de estudo de **Arquitetura Hexagonal (Ports and Adapters)**. O núcleo da aplicação concentra os casos de uso e o domínio; adaptadores conectam esse núcleo ao MongoDB, a um serviço HTTP de endereços e ao Kafka.
 
-O projeto implementa um CRUD de clientes em que a **regra de negócio fica isolada** (sem frameworks, sem conhecer banco de dados ou mensageria) e toda a comunicação com o mundo externo passa por **portas** e **adaptadores**. Ao cadastrar um cliente, a API busca o endereço em outro microserviço pelo CEP, salva no MongoDB e envia o CPF para uma fila do Kafka para validação. O resultado da validação volta por outro tópico e atualiza o cadastro.
+> Este README descreve o código que está neste repositório. O serviço externo que valida CPF não faz parte do projeto: o fluxo de retorno é demonstrado publicando uma mensagem no tópico de resposta.
 
-Projeto desenvolvido durante o curso [Arquitetura Hexagonal ou Ports and Adapters na Prática](https://www.udemy.com/course/arquitetura-hexagonal-ou-ports-and-adapters-na-pratica/), com testes de arquitetura em ArchUnit.
+## O que a aplicação faz
 
----
-
-## Sumário
-
-- [Funcionalidades](#funcionalidades)
-- [Tecnologias](#tecnologias)
-- [Arquitetura](#arquitetura)
-- [Fluxo da aplicação](#fluxo-da-aplicação)
-- [Endpoints da API](#endpoints-da-api)
-- [Mensageria (Kafka)](#mensageria-kafka)
-- [Como executar](#como-executar)
-- [Testes de arquitetura](#testes-de-arquitetura)
-- [Estrutura do projeto](#estrutura-do-projeto)
-- [Decisões de projeto](#decisões-de-projeto)
-- [Limitações conhecidas e próximos passos](#limitações-conhecidas-e-próximos-passos)
-
----
-
-## Funcionalidades
-
-- Cadastrar um cliente (o endereço é buscado pelo CEP em outro microserviço).
-- Consultar um cliente por ID.
-- Alterar um cliente (nome, CPF e CEP).
-- Excluir um cliente por ID.
-- Enviar o CPF para validação assíncrona via Kafka.
-- Receber o resultado da validação via Kafka e atualizar o cliente.
-- Validar a arquitetura automaticamente com testes (ArchUnit).
+- Cria, consulta, altera e exclui clientes.
+- Busca o endereço do cliente por CEP em um serviço HTTP.
+- Persiste clientes no MongoDB.
+- Publica o CPF para validação assíncrona no Kafka e consome o resultado para atualizar o cliente.
+- Usa portas e adaptadores para manter as regras dos casos de uso desacopladas de Spring, MongoDB, HTTP e Kafka.
+- Verifica regras de organização e dependência entre camadas com ArchUnit.
 
 ## Tecnologias
 
-| Tecnologia | Uso |
-|---|---|
-| Java | linguagem |
-| Spring Boot | aplicação e injeção de dependência (apenas nos adaptadores e na config) |
-| Spring Web | API REST |
-| Spring Validation | validação do corpo das requisições (`@NotBlank`) |
-| Spring Cloud OpenFeign | client HTTP para o microserviço de endereço |
-| Spring Data MongoDB | persistência |
-| Spring for Apache Kafka | produtor e consumidor de mensagens |
-| MapStruct | conversão entre objetos (request, entidade, mensagem e domínio) |
-| Lombok | redução de código repetitivo (somente nos adaptadores) |
-| ArchUnit | testes de arquitetura |
-| WireMock | simulação do microserviço de endereço |
-| Docker Compose | Kafka, Zookeeper, MongoDB e interfaces de apoio |
-| Gradle | build |
+- Java 17 e Gradle Wrapper 9.8.2.
+- Spring Boot 4.1.1, Spring Web MVC, Validation, Data MongoDB e Kafka.
+- Spring Cloud OpenFeign 2025.1.2 para a chamada ao serviço de endereços.
+- MapStruct 1.5.2.Final e Lombok.
+- MongoDB e Kafka; Docker Compose também sobe Zookeeper, Kafdrop e Mongo Express.
+- ArchUnit 1.2.1 para testes de arquitetura.
 
-As versões exatas estão no `build.gradle`.
-
----
+As versões estão declaradas em `hexagonal/build.gradle` e `hexagonal/gradle/wrapper/gradle-wrapper.properties`.
 
 ## Arquitetura
 
-O projeto segue a **Arquitetura Hexagonal**: o núcleo da aplicação (`application`) não depende de nada externo. Os **adaptadores** implementam ou chamam as **portas**, e a camada `config` monta tudo.
+O código Java está em `com.marchione.hexagonal`. A camada `application` contém o domínio, os casos de uso e as portas. Adaptadores de entrada recebem requisições HTTP e mensagens Kafka; adaptadores de saída integram com o serviço de endereços, MongoDB e Kafka. A montagem dos casos de uso é feita em `config`.
 
+```text
+HTTP ──> CustomerController ──> portas de entrada ──> casos de uso
+                                                       │
+Kafka ─> ReceiveValidatedCpfConsumer ──────────────────┤
+                                                       v
+                         portas de saída <── adaptadores de saída
+                           │             │              │
+                         Feign         MongoDB         Kafka
 ```
-                    ┌────────────────────────────────────────────┐
-  Controller  ─────►│  Porta de entrada ─► Use Case ─► Porta de  │─────► Client (Feign) ──► Serviço de endereço
-  (REST)            │                                  saída     │─────► Repository ──────► MongoDB
-  Consumer    ─────►│          application (core)                │─────► Producer ────────► Kafka
-  (Kafka)           └────────────────────────────────────────────┘
-   adapters.in                                                        adapters.out
-```
 
-### Camadas e responsabilidades
+### Pacotes
 
-| Camada | Pacote | Responsabilidade |
-|---|---|---|
-| Domínio | `application.core.domain` | `Customer` e `Address`, sem frameworks |
-| Casos de uso | `application.core.usecase` | regras de negócio, uma classe por funcionalidade |
-| Portas de entrada | `application.ports.in` | interfaces que expõem os casos de uso |
-| Portas de saída | `application.ports.out` | interfaces que o core usa para falar com o exterior |
-| Adaptadores de entrada | `adapters.in` | `controller` (REST) e `consumer` (Kafka) |
-| Adaptadores de saída | `adapters.out` | `client` (microserviço), `repository` (MongoDB) e produtor do Kafka |
-| Configuração | `config` | beans dos casos de uso e configurações do Kafka |
-
-### Regras de dependência
-
-| Camada | Quem pode acessar |
+| Pacote | Papel |
 |---|---|
-| Adaptadores de entrada | somente `config` |
-| Adaptadores de saída | somente `config` |
-| Casos de uso | somente `config` |
-| Portas de entrada | casos de uso e adaptadores de entrada |
-| Portas de saída | casos de uso e adaptadores de saída |
-| `config` | ninguém |
+| `application.core.domain` | Modelos de domínio `Customer` e `Address`, sem anotações de framework. |
+| `application.core.usecase` | Casos de uso de inserção, busca, alteração e exclusão. |
+| `application.ports.in` | Interfaces de entrada implementadas pelos casos de uso. |
+| `application.ports.out` | Interfaces usadas pelo núcleo para acessar serviços externos. |
+| `adapters.in.controller` | API REST, DTOs e mapeador da API. |
+| `adapters.in.consumer` | Consumidor de resultado da validação de CPF e modelo da mensagem. |
+| `adapters.out` | Implementações das portas de saída. |
+| `adapters.out.client` | Cliente Feign e modelos do serviço de endereço. |
+| `adapters.out.repository` | Repositório MongoDB, entidades e mapeador. |
+| `config` | Beans dos casos de uso e configuração do Kafka. |
 
-Essas regras são verificadas por testes automatizados (veja [Testes de arquitetura](#testes-de-arquitetura)).
+Os casos de uso não recebem anotações do Spring. As classes `InsertCustomerConfig`, `FindCustomerByIdConfig`, `UpdateCustomerConfig` e `DeleteCustomerByIdConfig` criam os respectivos beans, conectando portas e adaptadores.
 
-### Portas e adaptadores do projeto
+## Fluxos principais
 
-**Portas de entrada**
+### Cadastro
 
-| Porta | Implementada por |
-|---|---|
-| `InsertCustomerInputPort` | `InsertCustomerUseCase` |
-| `FindCustomerByIdInputPort` | `FindCustomerByIdUseCase` |
-| `UpdateCustomerInputPort` | `UpdateCustomerUseCase` |
-| `DeleteCustomerByIdInputPort` | `DeleteCustomerByIdUseCase` |
+1. `CustomerController` valida e converte o corpo da requisição.
+2. `InsertCustomerUseCase` busca o endereço pelo CEP usando a porta de saída.
+3. O cliente é gravado no MongoDB.
+4. O CPF é enviado como texto ao tópico `tp-cpf-validation`.
 
-**Portas de saída**
+O domínio inicializa `validCpf` como `false`. A gravação e o envio Kafka são operações sequenciais e não atômicas: se o envio falhar depois da gravação, o cliente permanece cadastrado.
 
-| Porta | Implementada por | Destino |
-|---|---|---|
-| `FindAddressByZipCodeOutputPort` | `FindAddressByZipCodeAdapter` | microserviço de endereço (Feign) |
-| `InsertCustomerOutputPort` | `InsertCustomerAdapter` | MongoDB |
-| `FindCustomerByIdOutputPort` | `FindCustomerByIdAdapter` | MongoDB |
-| `UpdateCustomerOutputPort` | `UpdateCustomerAdapter` | MongoDB |
-| `DeleteCustomerByIdOutputPort` | `DeleteCustomerByIdAdapter` | MongoDB |
-| `SendCpfForValidationOutputPort` | `SendCpfValidationAdapter` | Kafka |
+### Retorno da validação
 
-### Montagem dos beans
+`ReceiveValidatedCpfConsumer` escuta `tp-cpf-validated`, converte o JSON de `CustomerMessage` para o domínio e chama `UpdateCustomerUseCase`. Esse caso de uso é compartilhado com o endpoint `PUT`. A mensagem do consumidor contém `id`, `name`, `zipCode`, `cpf` e `validCpf`.
 
-Os casos de uso **não têm anotações do Spring**. A camada `config` cria um bean para cada um, passando as implementações das portas:
+### Alteração e exclusão
 
-| Configuração | Bean criado |
-|---|---|
-| `InsertCustomerConfig` | `InsertCustomerUseCase` |
-| `FindCustomerByIdConfig` | `FindCustomerByIdUseCase` |
-| `UpdateCustomerConfig` | `UpdateCustomerUseCase` |
-| `DeleteCustomerByIdConfig` | `DeleteCustomerByIdUseCase` |
+Antes de alterar ou excluir, os casos de uso consultam o cliente pela porta de entrada da busca por ID. A alteração também resolve novamente o endereço pelo CEP informado.
 
-Quando um caso de uso recebe a **porta de entrada** de outro (como `FindCustomerByIdInputPort` no update e no delete), o bean passado é o próprio caso de uso que a implementa.
+## API REST
 
----
+Endereço padrão: `http://localhost:8081/api/v1/customers`.
 
-## Fluxo da aplicação
-
-### Cadastro e validação do CPF
-
-```
-POST /api/v1/customers
-   → CustomerController
-      → CustomerMapper (CustomerRequest → Customer)
-      → InsertCustomerInputPort
-         → InsertCustomerUseCase
-            1. busca o endereço pelo CEP (microserviço de endereço)
-            2. salva o cliente no MongoDB (isValidCpf = false)
-            3. envia o CPF para o tópico tp-cpf-validation
-   ← 200 OK
-
-API de validação de CPF (externa/simulada)
-   → consome tp-cpf-validation, valida e publica em tp-cpf-validated
-
-ReceiveValidatedCpfConsumer (tópico tp-cpf-validated)
-   → CustomerMessageMapper (CustomerMessage → Customer)
-   → UpdateCustomerInputPort
-      → UpdateCustomerUseCase
-         → atualiza o cliente (inclusive o isValidCpf)
-```
-
-### Alteração
-
-```
-PUT /api/v1/customers/{id}
-   → UpdateCustomerUseCase
-      1. verifica se o cliente existe (FindCustomerByIdInputPort)
-      2. busca o endereço pelo CEP
-      3. grava a alteração
-   ← 204 No Content
-```
-
-### Exclusão
-
-```
-DELETE /api/v1/customers/{id}
-   → DeleteCustomerByIdUseCase
-      1. verifica se o cliente existe (FindCustomerByIdInputPort)
-      2. remove o cliente
-   ← 204 No Content
-```
-
----
-
-## Endpoints da API
-
-URL base: `http://localhost:8081/api/v1/customers`
-
-| Operação | Método | Endpoint | Corpo | Resposta |
-|---|---|---|---|---|
-| Cadastrar | `POST` | `/api/v1/customers` | `CustomerRequest` | `200 OK`, sem corpo |
-| Buscar por ID | `GET` | `/api/v1/customers/{id}` | | `200 OK`, `CustomerResponse` |
-| Alterar | `PUT` | `/api/v1/customers/{id}` | `CustomerRequest` | `204 No Content` |
-| Excluir | `DELETE` | `/api/v1/customers/{id}` | | `204 No Content` |
-
-### Corpo da requisição (`CustomerRequest`)
-
-| Campo | Tipo | Obrigatório | Descrição |
+| Ação | Método e caminho | Corpo | Resposta implementada |
 |---|---|---|---|
-| `name` | string | sim | nome do cliente |
-| `cpf` | string | sim | CPF do cliente |
-| `zipCode` | string | sim | CEP, usado para buscar o endereço |
+| Cadastrar | `POST /api/v1/customers` | `name`, `cpf`, `zipCode` | `200 OK`, sem corpo |
+| Consultar | `GET /api/v1/customers/{id}` | — | `200 OK`, cliente |
+| Alterar | `PUT /api/v1/customers/{id}` | `name`, `cpf`, `zipCode` | `204 No Content` |
+| Excluir | `DELETE /api/v1/customers/{id}` | — | `204 No Content` |
 
-Os três campos usam `@NotBlank`: não podem ser nulos, vazios nem conter só espaços. O `id` é gerado pelo MongoDB, e o endereço é obtido pelo CEP.
+Os campos do corpo são obrigatórios e usam `@NotBlank`. O endereço é obtido a partir do CEP; não é aceito no corpo da API. A resposta de consulta contém `name`, `address`, `cpf` e `validCpf`, mas **não contém `id`**.
 
-### Exemplos
-
-**Cadastrar**
-
-```bash
-curl -X POST http://localhost:8081/api/v1/customers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Maria",
-    "cpf": "12345678900",
-    "zipCode": "38400000"
-  }'
-```
-
-**Buscar por ID**
+Exemplo de cadastro:
 
 ```bash
-curl http://localhost:8081/api/v1/customers/{id}
+curl -i -X POST http://localhost:8081/api/v1/customers \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Maria","cpf":"12345678900","zipCode":"38400000"}'
 ```
 
-Resposta:
+Consulta e exemplo de resposta:
+
+```bash
+curl -i http://localhost:8081/api/v1/customers/<id>
+```
 
 ```json
 {
@@ -235,343 +114,169 @@ Resposta:
 }
 ```
 
-> O `id` não é devolvido na resposta. Para obter o `id`, consulte o documento no MongoDB.
-
-**Alterar**
+Exemplo de alteração:
 
 ```bash
-curl -X PUT http://localhost:8081/api/v1/customers/{id} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Sebastião",
-    "cpf": "12345678900",
-    "zipCode": "38400001"
-  }'
+curl -i -X PUT http://localhost:8081/api/v1/customers/<id> \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Maria","cpf":"12345678900","zipCode":"38400001"}'
 ```
 
-**Excluir**
+Exemplo de exclusão:
 
 ```bash
-curl -X DELETE http://localhost:8081/api/v1/customers/{id}
+curl -i -X DELETE http://localhost:8081/api/v1/customers/<id>
 ```
 
-### Códigos de resposta
+Corpos inválidos resultam em `400 Bad Request` pela validação. Cliente inexistente provoca uma `RuntimeException` em `FindCustomerByIdUseCase`; não há tratamento específico para convertê-la em `404`, então a aplicação atualmente responde com erro interno (`500`).
 
-| Código | Quando |
-|---|---|
-| `200 OK` | cadastro e busca realizados |
-| `204 No Content` | alteração e exclusão realizadas |
-| `400 Bad Request` | corpo inválido (campo em branco, por exemplo) |
-| `500 Internal Server Error` | cliente não encontrado (ver [limitações](#limitações-conhecidas-e-próximos-passos)) |
+## Kafka
 
----
+A configuração atual está codificada em `KafkaProducerConfig`, `KafkaConsumerConfig` e `SendCpfValidationAdapter`:
 
-## Mensageria (Kafka)
-
-| Tópico | Direção | Descrição |
+| Tópico | Direção | Conteúdo |
 |---|---|---|
-| `tp-cpf-validation` | a aplicação **envia** | CPF do cliente cadastrado, enviado como `String` |
-| `tp-cpf-validated` | a aplicação **recebe** | dados do cliente com o resultado da validação do CPF |
+| `tp-cpf-validation` | Produção | CPF como `String`. |
+| `tp-cpf-validated` | Consumo | JSON convertido para `CustomerMessage`, com `id`, `name`, `zipCode`, `cpf` e `validCpf`. |
 
-- **Broker:** `localhost:9092`
-- **Group id:** `marchione`
-- **Produtor:** serializa chave e valor como `String`.
-- **Consumidor:** chave como `String` e valor como **JSON**, convertido para `CustomerMessage`. Lê desde o início do tópico quando não há offset salvo (`earliest`).
+O broker configurado no código é `localhost:9092`; o grupo consumidor é `marchione`. O consumidor usa `earliest` quando ainda não existe offset para o grupo. O projeto não contém o serviço que valida CPF nem publica automaticamente a resposta.
 
-### Mensagem recebida em `tp-cpf-validated`
+Para simular uma resposta, publique em `tp-cpf-validated` um JSON semelhante ao seguinte, substituindo `<id>` por um ID existente:
 
 ```json
 {
-  "id": "<id do cliente>",
+  "id": "<id>",
   "name": "Maria",
   "zipCode": "38400000",
   "cpf": "12345678900",
-  "isValidCpf": true
+  "validCpf": true
 }
 ```
 
-Ao receber a mensagem, a aplicação atualiza o cliente com o `UpdateCustomerUseCase`, o mesmo usado pelo `PUT`.
-
----
-
-## Como executar
+## Como executar localmente
 
 ### Pré-requisitos
 
-- **Java**, na versão definida no `build.gradle`
-- **Docker** e **Docker Compose**
-- **WireMock** (JAR standalone), para simular o serviço de endereço: <https://wiremock.org/docs/download-and-installation/>
+- JDK 17.
+- Docker com Docker Compose.
+- WireMock standalone para simular o serviço HTTP de endereços.
 
-### 1. Subir Kafka e MongoDB
-
-Na pasta `docker-local`:
+### 1. Subir as dependências
 
 ```bash
-docker compose up
+cd hexagonal/docker-local
+docker compose up -d
 ```
 
-| Serviço | Porta | Observação |
-|---|---|---|
-| Zookeeper | `2181` | |
-| Kafka | `9092` | endereço usado pela aplicação (`localhost:9092`) |
-| Kafdrop | `9000` | interface web para ver tópicos e mensagens |
-| MongoDB | `27017` | usuário `root`, senha `example` |
-| Mongo Express | `8083` | interface web do Mongo |
+O `docker-compose.yml` sobe:
 
-### 2. Criar os tópicos do Kafka
+| Serviço | Porta local | Uso |
+|---|---:|---|
+| Zookeeper | `2181` | Coordenação do Kafka. |
+| Kafka | `9092` | Broker usado pela aplicação. |
+| Kafdrop | `9000` | Interface para tópicos e mensagens. |
+| MongoDB | `27017` | Banco da aplicação. |
+| Mongo Express | `8083` | Interface web para MongoDB. |
+
+No ambiente local, o MongoDB é iniciado com usuário `root`, senha `example` e banco configurado como `hexagonal` na aplicação. São credenciais de desenvolvimento, não use esses valores em ambientes compartilhados ou de produção.
+
+### 2. Criar os tópicos
+
+Execute a partir de `hexagonal/docker-local`:
 
 ```bash
-docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic tp-cpf-validation
-docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --topic tp-cpf-validated
+docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic tp-cpf-validation
+docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic tp-cpf-validated
 ```
 
-Também é possível criá-los pelo Kafdrop (`http://localhost:9000`) ou por um plugin de Kafka da IDE.
+Também é possível criar os tópicos pelo Kafdrop em `http://localhost:9000`.
 
-### 3. Subir o WireMock na porta 8082
+### 3. Simular o serviço de endereços
 
-Em uma pasta de trabalho, crie a pasta `mappings` com os dois arquivos abaixo e execute:
-
-```bash
-java -jar wiremock-standalone-<versão>.jar --port 8082
-```
-
-> Sempre que criar ou alterar um arquivo em `mappings`, pare e inicie o WireMock novamente.
-
-`mappings/address.json`
+A URL configurada na aplicação é `http://localhost:8082/addresses`. Inicie o WireMock na porta 8082 com um mapeamento para cada CEP usado nos testes. Por exemplo, salve este conteúdo em `mappings/address.json` na pasta de trabalho do WireMock:
 
 ```json
 {
-    "request": {
-        "method": "GET",
-        "url": "/addresses/38400000"
-    },
-    "response": {
-        "status": 200,
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "jsonBody": {
-            "street": "Rua Hexagonal",
-            "city": "Uberlândia",
-            "state": "Minas Gerais"
-        }
+  "request": {
+    "method": "GET",
+    "url": "/addresses/38400000"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "street": "Rua Hexagonal",
+      "city": "Uberlândia",
+      "state": "Minas Gerais"
     }
+  }
 }
 ```
 
-`mappings/address_2.json`
-
-```json
-{
-    "request": {
-        "method": "GET",
-        "url": "/addresses/38400001"
-    },
-    "response": {
-        "status": 200,
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "jsonBody": {
-            "street": "Rua das Flores",
-            "city": "São Paulo",
-            "state": "São Paulo"
-        }
-    }
-}
-```
-
-| CEP | Endereço devolvido |
-|---|---|
-| `38400000` | Rua Hexagonal, Uberlândia, Minas Gerais |
-| `38400001` | Rua das Flores, São Paulo, São Paulo |
-
-Qualquer outro CEP devolve `404` no WireMock, e o cadastro falha. Use um dos dois acima.
-
-### 4. Subir a aplicação
-
-Configuração em `application.yml`:
-
-```yaml
-server:
-    port: 8081
-
-marchione:
-  client:
-    address:
-      url: http://localhost:8082/addresses
-
-spring:
-  mongodb:
-    host: localhost
-    port: 27017
-    authentication-database: admin
-    username: root
-    password: example
-    database: hexagonal
-```
-
-> As propriedades do MongoDB ficam em `spring.mongodb` ou `spring.data.mongodb`, conforme a versão do Spring Boot do projeto.
-
-Na pasta do projeto (`hexagonal`):
+Inicie-o apontando para essa pasta de mappings:
 
 ```bash
+java -jar wiremock-standalone-<versao>.jar --port 8082 --root-dir <pasta-do-wiremock>
+```
+
+O README original do projeto também documentava um segundo CEP de exemplo, `38400001`, associado a Rua das Flores, São Paulo. Esse mapeamento deve ser adicionado ao WireMock se for usado no `PUT`. CEPs sem mapeamento não são resolvidos pelo mock.
+
+### 4. Iniciar a aplicação
+
+A configuração padrão está em `hexagonal/src/main/resources/application.yml`: servidor na porta `8081`, serviço de endereço na porta `8082` e MongoDB em `localhost:27017`.
+
+```bash
+cd hexagonal
 ./gradlew bootRun
 ```
 
-A API fica disponível em `http://localhost:8081`.
+No Windows, use `gradlew.bat bootRun`. Após a inicialização, a API fica disponível em `http://localhost:8081`.
 
-### 5. Testar o fluxo completo
+## Testes
 
-1. `POST /api/v1/customers` com o CEP `38400000`.
-2. Conferir no MongoDB:
-
-   ```
-   use hexagonal
-   db.customers.find()
-   ```
-
-   O cliente é gravado com o endereço de Uberlândia e `isValidCpf` igual a `false`.
-3. `GET /api/v1/customers/{id}` com o `id` do documento.
-4. Conferir no Kafdrop (ou no Offset Explorer) que chegou uma mensagem em `tp-cpf-validation`.
-5. `PUT /api/v1/customers/{id}` mudando o nome e o CEP para `38400001`.
-6. Publicar manualmente uma mensagem em `tp-cpf-validated` (JSON acima) para simular a validação do CPF e conferir que `isValidCpf` passa a `true`.
-7. `DELETE /api/v1/customers/{id}`.
-
----
-
-## Testes de arquitetura
-
-Os testes usam **ArchUnit** e ficam em `src/test/java/com/marchione/hexagonal/architecture`.
-
-### `LayeredArchitectureTest`: acesso entre camadas
-
-Define as camadas `AdaptersIn`, `AdaptersOut`, `UseCase`, `PortsIn`, `PortsOut` e `Config` e garante as regras da tabela de [dependências](#regras-de-dependência). O domínio fica de fora de propósito: qualquer camada pode usá-lo.
-
-### `NamingConventionTest`: nomes e pacotes
-
-Dois grupos de regras, com 14 testes cada:
-
-1. **Nome → pacote:** classes com determinado sufixo só podem estar no pacote correspondente.
-2. **Pacote → nome:** classes de um pacote só podem ter o sufixo esperado.
-
-| Sufixo | Pacote |
-|---|---|
-| `Consumer` | `adapters.in.consumer` |
-| `Mapper` / `MapperImpl` | `mapper` de `adapters.in.consumer`, `adapters.in.controller`, `adapters.out.client` e `adapters.out.repository` |
-| `Message` | `adapters.in.consumer.message` |
-| `Controller` | `adapters.in.controller` |
-| `Request` | `request` (controller ou client) |
-| `Response` | `response` (controller ou client) |
-| `Adapter` | `adapters.out` |
-| `Client` | `adapters.out.client` |
-| `Repository` | `adapters.out.repository` |
-| `Entity` | `adapters.out.repository.entity` |
-| `UseCase` | `application.core.usecase` |
-| `InputPort` | `application.ports.in` |
-| `OutputPort` | `application.ports.out` |
-| `Config` | `config` |
-
-O `MapperImpl` é aceito porque o MapStruct gera uma implementação para cada mapper.
-
-Para rodar:
+Os testes existentes são testes de arquitetura com ArchUnit; não há atualmente testes unitários de casos de uso nem testes de integração implementados no projeto.
 
 ```bash
+cd hexagonal
 ./gradlew test
 ```
 
----
+- `LayeredArchitectureTest` verifica regras de dependência entre adaptadores, casos de uso, portas e configuração.
+- `NamingConventionTest` verifica convenções de sufixos e pacotes para componentes como `Controller`, `Adapter`, `UseCase`, `InputPort` e `OutputPort`.
 
-## Estrutura do projeto
+## Estrutura do repositório
 
-```
-hexagonal
-├── docker-local
-│   └── docker-compose.yml
-└── src
-    ├── main
-    │   ├── java/com/marchione/hexagonal
-    │   │   ├── HexagonalApplication.java
-    │   │   ├── adapters
-    │   │   │   ├── in
-    │   │   │   │   ├── consumer
-    │   │   │   │   │   ├── ReceiveValidatedCpfConsumer.java
-    │   │   │   │   │   ├── mapper/CustomerMessageMapper.java
-    │   │   │   │   │   └── message/CustomerMessage.java
-    │   │   │   │   └── controller
-    │   │   │   │       ├── CustomerController.java
-    │   │   │   │       ├── mapper/CustomerMapper.java
-    │   │   │   │       ├── request/CustomerRequest.java
-    │   │   │   │       └── response/{CustomerResponse, AddressResponse}.java
-    │   │   │   └── out
-    │   │   │       ├── FindAddressByZipCodeAdapter.java
-    │   │   │       ├── InsertCustomerAdapter.java
-    │   │   │       ├── FindCustomerByIdAdapter.java
-    │   │   │       ├── UpdateCustomerAdapter.java
-    │   │   │       ├── DeleteCustomerByIdAdapter.java
-    │   │   │       ├── SendCpfValidationAdapter.java
-    │   │   │       ├── client
-    │   │   │       │   ├── FindAddressByZipCodeClient.java
-    │   │   │       │   ├── mapper/AddressResponseMapper.java
-    │   │   │       │   └── response/AddressResponse.java
-    │   │   │       └── repository
-    │   │   │           ├── CustomerRepository.java
-    │   │   │           ├── entity/{CustomerEntity, AddressEntity}.java
-    │   │   │           └── mapper/CustomerEntityMapper.java
-    │   │   ├── application
-    │   │   │   ├── core
-    │   │   │   │   ├── domain/{Customer, Address}.java
-    │   │   │   │   └── usecase/{Insert, FindById, Update, DeleteById}...UseCase.java
-    │   │   │   └── ports
-    │   │   │       ├── in/{Insert, FindById, Update, DeleteById}...InputPort.java
-    │   │   │       └── out/...OutputPort.java
-    │   │   └── config
-    │   │       ├── {Insert, FindById, Update, DeleteById}...Config.java
-    │   │       ├── KafkaProducerConfig.java
-    │   │       └── KafkaConsumerConfig.java
-    │   └── resources/application.yml
-    └── test/java/com/marchione/hexagonal/architecture
-        ├── LayeredArchitectureTest.java
-        └── NamingConventionTest.java
+```text
+.
+├── README.md
+└── hexagonal/                         Aplicação Gradle
+    ├── build.gradle                   Plugins e dependências
+    ├── docker-local/docker-compose.yml Serviços locais
+    ├── gradle/wrapper/                Wrapper Gradle
+    └── src/
+        ├── main/java/com/marchione/hexagonal/
+        │   ├── adapters/              Entradas HTTP/Kafka e saídas HTTP/Mongo/Kafka
+        │   ├── application/           Domínio, casos de uso e portas
+        │   └── config/                Beans e configuração do Kafka
+        ├── main/resources/application.yml
+        └── test/java/com/marchione/hexagonal/architecture/
+            ├── LayeredArchitectureTest.java
+            └── NamingConventionTest.java
 ```
 
----
+## Limitações e próximos passos
 
-## Decisões de projeto
+- Implementar tratamento explícito de cliente inexistente e resposta HTTP `404`.
+- Avaliar retornar `201 Created` no cadastro e expor o ID do cliente criado.
+- Definir se uma alteração deve preservar o `validCpf` previamente validado; o mapeamento da requisição não o recebe.
+- Tornar gravação no MongoDB e publicação Kafka resilientes a falhas, por exemplo, com o padrão outbox.
+- Configurar retry e dead-letter topic para falhas no consumidor.
+- Externalizar broker, tópicos, grupo Kafka e credenciais para configuração apropriada por ambiente.
+- Adicionar testes unitários e de integração, além dos testes de arquitetura existentes.
+- Documentar os endpoints com OpenAPI/Swagger.
 
-- **Core sem framework:** as classes de `application` não usam Spring, Lombok nem MapStruct. Getters, setters e construtores do domínio são escritos manualmente.
-- **Um modelo por borda:** o controller usa `CustomerRequest` e `CustomerResponse`, o MongoDB usa `CustomerEntity`, o Kafka usa `CustomerMessage`, e o microserviço de endereço usa `AddressResponse`. O domínio não vaza para fora, e as conversões são feitas por mappers (MapStruct).
-- **Regra de negócio no use case:** a decisão "cliente não encontrado" fica no `FindCustomerByIdUseCase`. Os adapters só devolvem um `Optional`.
-- **Reaproveitamento por portas de entrada:** `update` e `delete` verificam a existência do cliente chamando a porta de entrada da busca por ID, sem duplicar regra.
-- **Várias entradas, mesma regra:** o `PUT` e o consumidor do Kafka usam o mesmo `UpdateCustomerUseCase`.
-- **Montagem na `config`:** é o único ponto que conhece os adapters e os use cases ao mesmo tempo.
-- **Arquitetura protegida por testes:** regras de dependência e de nomenclatura são verificadas a cada build.
+## Créditos
 
-### Vantagens e desvantagens
+Projeto de estudo inspirado no curso [Arquitetura Hexagonal ou Ports and Adapters na Prática](https://www.udemy.com/course/arquitetura-hexagonal-ou-ports-and-adapters-na-pratica/).
 
-| Vantagens | Desvantagens |
-|---|---|
-| core isolado e fácil de testar | mais código e mais abstrações que em MVC |
-| troca de tecnologia só nos adaptadores | curva de aprendizado maior |
-| estrutura que "se explica" ao ser lida | esforço de mapeamento entre modelos |
-| uma classe, uma responsabilidade (SOLID) | pode ser exagero em CRUDs simples |
-
----
-
-## Limitações conhecidas e próximos passos
-
-- **Cliente não encontrado:** o `FindCustomerByIdUseCase` lança uma `RuntimeException` genérica, que a API devolve como `500`. Próximo passo: criar uma exceção própria (como `CustomerNotFoundException`) e tratá-la com `@RestControllerAdvice`, devolvendo `404`.
-- **Cadastro devolve `200`:** pela convenção REST, criação costuma retornar `201 Created` com o `id` ou o `Location` do recurso.
-- **Alteração e `isValidCpf`:** o `PUT` grava o cliente inteiro, e o `isValidCpf` vindo da requisição não é informado (nasce `false`). Vale definir se a alteração deve preservar o valor já validado.
-- **Envio ao Kafka não atômico:** o cliente é salvo antes de o CPF ser enviado. Se o envio falhar, o cadastro fica com o CPF não validado. Uma alternativa é o padrão *outbox*.
-- **Tratamento de erros do consumidor:** falhas ao processar mensagens (cliente inexistente, por exemplo) ainda não têm política de retry nem *dead letter topic*.
-- **Configurações fixas no código:** endereço do Kafka e nomes dos tópicos poderiam ir para o `application.yml`.
-- **Credenciais:** `root` / `example` são os padrões do ambiente de estudo. Em outros ambientes, use variáveis de ambiente ou um arquivo local fora do versionamento.
-- **Testes de unidade:** os casos de uso recebem só interfaces, então são fáceis de testar com portas simuladas. Ainda não há testes unitários ou de integração, além dos de arquitetura.
-- **Documentação da API:** adicionar OpenAPI/Swagger.
-
----
-
-## Autor
-
-[gabrielmarchione1](https://github.com/gabrielmarchione1)
+Autor: [gabrielmarchione1](https://github.com/gabrielmarchione1).
